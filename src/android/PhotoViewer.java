@@ -1,79 +1,325 @@
 package com.sarriaroman.PhotoViewer;
 
-import android.Manifest;
+import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
+import android.net.Uri;
+import android.os.AsyncTask;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.os.StrictMode;
+import android.util.Base64;
+import android.view.View;
+import android.widget.ImageButton;
+import android.widget.ImageView;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
 
-import org.apache.cordova.CallbackContext;
-import org.apache.cordova.CordovaPlugin;
-import org.apache.cordova.PluginResult;
+import com.squareup.picasso.Callback;
+import com.squareup.picasso.Picasso;
+import com.squareup.picasso.RequestCreator;
+
 import org.json.JSONArray;
 import org.json.JSONException;
+import org.json.JSONObject;
 
-/**
- * Class to Open PhotoViewer with the Required Parameters from Cordova
- * <p>
- * - URL
- * - Title
- */
-public class PhotoViewer extends CordovaPlugin {
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import uk.co.senab.photoview.PhotoViewAttacher;
 
-    public static final int PERMISSION_DENIED_ERROR = 20;
+public class PhotoActivity extends Activity {
+    private PhotoViewAttacher mAttacher;
 
-    public static final String WRITE = Manifest.permission.WRITE_EXTERNAL_STORAGE;
-    public static final String READ = Manifest.permission.READ_EXTERNAL_STORAGE;
+    private ImageView photo;
 
-    public static final int REQ_CODE = 0;
+    private ImageButton closeBtn;
+    private ImageButton shareBtn;
+    private ProgressBar loadingBar;
 
-    protected JSONArray args;
-    protected CallbackContext callbackContext;
+    private TextView titleTxt;
 
-    @Override
-    public boolean execute(String action, JSONArray args, CallbackContext callbackContext) throws JSONException {
-        if (action.equals("show")) {
-            this.args = args;
-            this.callbackContext = callbackContext;
+    private String mImage;
+    private String mTitle;
+    private boolean mShare;
+    private JSONObject mHeaders;
+    private JSONObject pOptions;
+    private File mTempImage;
+    private int shareBtnVisibility;
 
-            if (cordova.hasPermission(READ) && cordova.hasPermission(WRITE)) {
-                this.launchActivity();
-            } else {
-                this.getPermission();
-            }
-            return true;
-        }
-        return false;
-    }
-
-    protected void getPermission() {
-        cordova.requestPermissions(this, REQ_CODE, new String[]{WRITE, READ});
-    }
-
-    //
-    protected void launchActivity() throws JSONException {
-        Intent i = new Intent(this.cordova.getActivity(), com.sarriaroman.PhotoViewer.PhotoActivity.class);
-        PhotoActivity.mArgs = this.args;
-
-        this.cordova.getActivity().startActivity(i);
-        this.callbackContext.success("");
-    }
+    public static JSONArray mArgs = null;
 
     @Override
-    public void onRequestPermissionResult(int requestCode, String[] permissions,
-                                          int[] grantResults) throws JSONException {
-        for (int r : grantResults) {
-            if (r == PackageManager.PERMISSION_DENIED) {
-                this.callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.ERROR, PERMISSION_DENIED_ERROR));
-                return;
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        setContentView(getApplication().getResources().getIdentifier("activity_photo", "layout", getApplication().getPackageName()));
+
+        // Load the Views
+        findViews();
+
+        try {
+            this.mImage = mArgs.getString(0);
+            this.mTitle = mArgs.getString(1);
+            this.mShare = mArgs.getBoolean(2);
+            this.mHeaders = parseHeaders(mArgs.optString(5));
+            this.pOptions = mArgs.optJSONObject(6);
+
+            if( pOptions == null ) {
+                pOptions = new JSONObject();
+                pOptions.put("fit", true);
+                pOptions.put("centerInside", true);
+                pOptions.put("centerCrop", false);
             }
+
+            //Set the share button visibility
+            shareBtnVisibility = this.mShare ? View.VISIBLE : View.INVISIBLE;
+
+
+        } catch (JSONException exception) {
+            shareBtnVisibility = View.INVISIBLE;
+        }
+        shareBtn.setVisibility(shareBtnVisibility);
+        //Change the activity title
+        if (!mTitle.equals("")) {
+            titleTxt.setText(mTitle);
         }
 
-        switch (requestCode) {
-            case REQ_CODE:
-                launchActivity();
-                break;
+        try {
+            loadImage();
+        } catch (JSONException e) {
+            e.printStackTrace();
         }
+
+        // Set Button Listeners
+        closeBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                finish();
+            }
+        });
+
+        shareBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (Build.VERSION.SDK_INT >= 24) {
+                    try {
+                        Method m = StrictMode.class.getMethod("disableDeathOnFileUriExposure");
+                        m.invoke(null);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                Uri imageUri;
+                if (mTempImage == null) {
+                    mTempImage = getLocalBitmapFileFromView(photo);
+                }
+
+                imageUri = Uri.fromFile(mTempImage);
+
+                if (imageUri != null) {
+                    Intent sharingIntent = new Intent(Intent.ACTION_SEND);
+
+                    sharingIntent.setType("image/*");
+                    sharingIntent.putExtra(Intent.EXTRA_STREAM, imageUri);
+
+                    startActivity(Intent.createChooser(sharingIntent, "Share"));
+                }
+            }
+        });
 
     }
 
+    /**
+     * Find and Connect Views
+     */
+    private void findViews() {
+        // Buttons first
+        closeBtn = (ImageButton) findViewById(getApplication().getResources().getIdentifier("closeBtn", "id", getApplication().getPackageName()));
+        shareBtn = (ImageButton) findViewById(getApplication().getResources().getIdentifier("shareBtn", "id", getApplication().getPackageName()));
 
+        //ProgressBar
+        loadingBar = (ProgressBar) findViewById(getApplication().getResources().getIdentifier("loadingBar", "id", getApplication().getPackageName()));
+        // Photo Container
+        photo = (ImageView) findViewById(getApplication().getResources().getIdentifier("photoView", "id", getApplication().getPackageName()));
+        mAttacher = new PhotoViewAttacher(photo);
+
+        // Title TextView
+        titleTxt = (TextView) findViewById(getApplication().getResources().getIdentifier("titleTxt", "id", getApplication().getPackageName()));
+    }
+
+    /**
+     * Get the current Activity
+     *
+     * @return
+     */
+    private Activity getActivity() {
+        return this;
+    }
+
+    /**
+     * Hide Loading when showing the photo. Update the PhotoView Attacher
+     */
+    private void hideLoadingAndUpdate() {
+        photo.setVisibility(View.VISIBLE);
+        loadingBar.setVisibility(View.INVISIBLE);
+        shareBtn.setVisibility(shareBtnVisibility);
+
+        mAttacher.update();
+    }
+
+    private RequestCreator setOptions(RequestCreator picasso) throws JSONException {
+        if(this.pOptions.has("fit") && this.pOptions.optBoolean("fit")) {
+            picasso.fit();
+        }
+
+        if(this.pOptions.has("centerInside") && this.pOptions.optBoolean("centerInside")) {
+            picasso.centerInside();
+        }
+
+        if(this.pOptions.has("centerCrop") && this.pOptions.optBoolean("centerCrop")) {
+            picasso.centerCrop();
+        }
+
+        return picasso;
+    }
+
+    /**
+     * Load the image using Picasso
+     */
+    private void loadImage() throws JSONException {
+        if (mImage.startsWith("http") || mImage.startsWith("file")) {
+            this.setOptions(Picasso.get().load(mImage)).into(photo, new Callback() {
+                @Override
+                public void onSuccess() {
+                    hideLoadingAndUpdate();
+                }
+
+                @Override
+                public void onError(Exception e) {
+                    Toast.makeText(getActivity(), "Error loading image.", Toast.LENGTH_LONG).show();
+
+                    finish();
+                }
+            });
+        } else if (mImage.startsWith("data:image")) {
+
+            new AsyncTask<Void, Void, File>() {
+
+                protected File doInBackground(Void... params) {
+                    String base64Image = mImage.substring(mImage.indexOf(",") + 1);
+                    return getLocalBitmapFileFromString(base64Image);
+                }
+
+                protected void onPostExecute(File file) {
+                    mTempImage = file;
+
+                    try {
+                        setOptions(Picasso.get().load(mTempImage))
+                                .into(photo, new Callback() {
+                                    @Override
+                                    public void onSuccess() {
+                                        hideLoadingAndUpdate();
+                                    }
+
+                                    @Override
+                                    public void onError(Exception e) {
+                                        Toast.makeText(getActivity(), "Error loading image.", Toast.LENGTH_LONG).show();
+
+                                        finish();
+                                    }
+                                });
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }.execute();
+
+        } else {
+            photo.setImageURI(Uri.parse(mImage));
+
+            hideLoadingAndUpdate();
+        }
+    }
+
+    public void onDestroy() {
+        if (mTempImage != null) {
+            mTempImage.delete();
+        }
+        super.onDestroy();
+    }
+
+
+    public File getLocalBitmapFileFromString(String base64) {
+        File file;
+        try {
+            file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "share_image_" + System.currentTimeMillis() + ".png");
+            file.getParentFile().mkdirs();
+            FileOutputStream output = new FileOutputStream(file);
+            byte[] decoded = Base64.decode(base64, Base64.DEFAULT);
+            output.write(decoded);
+            output.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+            file = null;
+        }
+        return file;
+    }
+
+    /**
+     * Create Local Image due to Restrictions
+     *
+     * @param imageView
+     * @return
+     */
+    public File getLocalBitmapFileFromView(ImageView imageView) {
+        Drawable drawable = imageView.getDrawable();
+        Bitmap bmp;
+
+        if (drawable instanceof BitmapDrawable) {
+            bmp = ((BitmapDrawable) imageView.getDrawable()).getBitmap();
+        } else {
+            return null;
+        }
+
+        // Store image to default external storage directory
+        File file;
+        try {
+            file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "share_image_" + System.currentTimeMillis() + ".png");
+            file.getParentFile().mkdirs();
+            FileOutputStream out = new FileOutputStream(file);
+            bmp.compress(Bitmap.CompressFormat.PNG, 90, out);
+            out.close();
+
+        } catch (IOException e) {
+            file = null;
+            e.printStackTrace();
+        }
+        return file;
+    }
+
+    private JSONObject parseHeaders(String headerString) {
+        JSONObject headers = null;
+
+        // Short circuit if headers is empty
+        if (headerString == null || headerString.length() == 0) {
+            return headers;
+        }
+
+        // headers should never be a JSON array, only a JSON object
+        try {
+            headers = new JSONObject(headerString);
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+        return headers;
+    }
 }
